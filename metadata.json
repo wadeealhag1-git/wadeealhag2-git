@@ -1,0 +1,6 @@
+{
+  "name": "منصة التفوق الرياضي - أ. وديع الحاج",
+  "description": "منصة تعليمية تفاعلية مخصصة لمراجعة منهج الرياضيات واختبار المهارات لطلاب الصف السادس بمدارس النهضة الحديثة تحت إشراف الأستاذ وديع الحاج.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
