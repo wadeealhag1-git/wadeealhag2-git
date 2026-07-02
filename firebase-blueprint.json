@@ -1,0 +1,54 @@
+{
+  "collections": {
+    "logs": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "name": { "type": "string" },
+          "info": { "type": "string" },
+          "score": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "createdAt": { "type": "string" }
+        }
+      }
+    },
+    "forumComments": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "studentName": { "type": "string" },
+          "text": { "type": "string" },
+          "category": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "likes": { "type": "number" },
+          "createdAt": { "type": "string" }
+        }
+      }
+    },
+    "feedbackMessages": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "studentName": { "type": "string" },
+          "category": { "type": "string" },
+          "text": { "type": "string" },
+          "timestamp": { "type": "string" },
+          "reply": { "type": "string" },
+          "createdAt": { "type": "string" }
+        }
+      }
+    },
+    "passwords": {
+      "schema": {
+        "type": "object",
+        "properties": {
+          "passwords": { "type": "object" }
+        }
+      }
+    }
+  }
+}

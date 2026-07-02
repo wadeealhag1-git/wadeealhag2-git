@@ -33,10 +33,40 @@ import {
   Filter,
   Sparkles,
   MessageCircle,
-  FileText
+  FileText,
+  Trophy,
+  Crown,
+  Flame
 } from "lucide-react";
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from "recharts";
 import { syllabusData } from "./data";
 import { Lesson, Question, LogEntry, ForumComment, FeedbackMessage } from "./types";
+import {
+  subscribeLogs,
+  addLog,
+  clearAllLogs,
+  seedDefaultLogs,
+  subscribeForum,
+  addForumComment,
+  likeForumComment,
+  deleteForumComment,
+  seedDefaultForumComments,
+  subscribeFeedback,
+  addFeedbackMessage,
+  replyFeedbackMessage,
+  deleteFeedbackMessage,
+  seedDefaultFeedbackMessages,
+  subscribePasswords,
+  updatePasswords
+} from "./lib/firebase";
 
 // Helper for Arabic digits conversion
 function toArabicDigits(num: number | string): string {
@@ -55,6 +85,39 @@ function toEnglishDigits(str: string): string {
   );
 }
 
+// Extracted numeric percentage for chart plotting
+function getScorePercentage(scoreStr: string): number {
+  if (!scoreStr || scoreStr === "-") return 0;
+  
+  // Convert score string to standard digits
+  const cleanStr = toEnglishDigits(scoreStr);
+  
+  // Try to find the % inside parentheses first
+  const matchPct = cleanStr.match(/\(([^%]+)%\)/) || cleanStr.match(/\(([^٪]+)٪\)/);
+  if (matchPct) {
+    const val = parseInt(matchPct[1].trim(), 10);
+    return isNaN(val) ? 0 : val;
+  }
+  
+  // Match "X من Y"
+  const parts = cleanStr.split("من");
+  if (parts.length === 2) {
+    const scoreVal = parseInt(parts[0].replace(/[^0-9]/g, ""), 10);
+    const totalVal = parseInt(parts[1].replace(/[^0-9]/g, ""), 10);
+    if (!isNaN(scoreVal) && !isNaN(totalVal) && totalVal > 0) {
+      return Math.round((scoreVal / totalVal) * 100);
+    }
+  }
+  
+  // Fallback to just scanning for any number up to 100
+  const anyNum = parseInt(cleanStr.replace(/[^0-9]/g, ""), 10);
+  if (!isNaN(anyNum)) {
+    return anyNum <= 100 ? anyNum : 100;
+  }
+  
+  return 0;
+}
+
 export default function App() {
   // Screens state
   const [screen, setScreen] = useState<"welcome" | "dashboard" | "quiz" | "result" | "admin">("welcome");
@@ -65,7 +128,7 @@ export default function App() {
   const [dashboardTab, setDashboardTab] = useState<"lessons" | "forum" | "feedback">("lessons");
 
   // Admin Panel Tab
-  const [adminTab, setAdminTab] = useState<"passwords" | "logs" | "forum" | "feedback">("passwords");
+  const [adminTab, setAdminTab] = useState<"passwords" | "logs" | "forum" | "feedback">("logs");
   const [adminRepliesState, setAdminRepliesState] = useState<Record<string, string>>({});
 
   // Advanced Filtering States for lessons directory
@@ -105,115 +168,238 @@ export default function App() {
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState("");
 
+  // Custom interactive alert/confirm state to replace blocking window.alert/confirm
+  const [customAlert, setCustomAlert] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+    onClose?: () => void;
+  } | null>(null);
+
+  const [customConfirm, setCustomConfirm] = useState<{
+    show: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    onCancel?: () => void;
+  } | null>(null);
+
+  const showAlert = (message: string, title: string = "تنبيه", onClose?: () => void) => {
+    setCustomAlert({ show: true, title, message, onClose });
+  };
+
+  const showConfirm = (message: string, onConfirm: () => void, title: string = "تأكيد الإجراء", onCancel?: () => void) => {
+    setCustomConfirm({ show: true, title, message, onConfirm, onCancel });
+  };
+
+  // Admin Login Modal from inside the platform
+  const [showAdminLoginModal, setShowAdminLoginModal] = useState(false);
+  const [adminDashboardPassword, setAdminDashboardPassword] = useState("");
+  const [adminDashboardError, setAdminDashboardError] = useState("");
+
+  // Selected student for progress visualization in Admin Dashboard
+  const [selectedChartStudent, setSelectedChartStudent] = useState<string>("");
+
   // Stats derived from logs
   const [studentStats, setStudentStats] = useState({ completedCount: 0, avgScore: 0 });
 
+  // Badges calculations for active student
+  const activeStudentTests = logs.filter(
+    (l) => l.name === studentName && l.type === "اختبار رصد مهارة"
+  );
+
+  let maxConsecutivePerfect = 0;
+  let currentConsecutivePerfect = 0;
+  activeStudentTests.forEach((t) => {
+    const pct = getScorePercentage(t.score);
+    if (pct === 100) {
+      currentConsecutivePerfect++;
+      if (currentConsecutivePerfect > maxConsecutivePerfect) {
+        maxConsecutivePerfect = currentConsecutivePerfect;
+      }
+    } else {
+      currentConsecutivePerfect = 0;
+    }
+  });
+
+  const hasTripleConsecutiveBadge = maxConsecutivePerfect >= 3;
+  const hasFirstPerfectBadge = activeStudentTests.some((t) => getScorePercentage(t.score) === 100);
+  const totalPerfectScoresCount = activeStudentTests.filter((t) => getScorePercentage(t.score) === 100).length;
+  const uniqueCompletedLessonsCount = new Set(activeStudentTests.map((t) => t.info)).size;
+
   // Init data and state on mount
   useEffect(() => {
-    // Read/Initialize Passwords
-    const savedPasswords = localStorage.getItem("lessonPasswords");
-    let currentPwds: Record<string, string> = {};
-    if (savedPasswords) {
-      try {
-        currentPwds = JSON.parse(savedPasswords);
-      } catch (e) {
-        currentPwds = {};
-      }
-    }
-    // Set defaults if empty
-    if (Object.keys(currentPwds).length === 0) {
-      for (let i = 1; i <= 16; i++) {
-        currentPwds["L" + i] = "١٢٣" + toArabicDigits(i);
-      }
-      localStorage.setItem("lessonPasswords", JSON.stringify(currentPwds));
-    }
-    setPasswords(currentPwds);
-
-    // Read/Initialize Logs
-    const savedLogs = localStorage.getItem("wadeehAdminSystemLogs");
-    if (savedLogs) {
-      try {
-        setLogs(JSON.parse(savedLogs));
-      } catch (e) {
-        setLogs([]);
-      }
-    }
-
     // Load active session if any
     const savedSessionName = localStorage.getItem("activeStudentName");
     if (savedSessionName) {
       setStudentName(savedSessionName);
+      setScreen("dashboard");
     }
 
-    // Load Forum Comments
-    const savedComments = localStorage.getItem("wadeehForumComments");
-    if (savedComments) {
-      try {
-        setForumComments(JSON.parse(savedComments));
-      } catch (e) {
-        setForumComments([]);
+    // Seed defaults if empty
+    const defaultLogs: LogEntry[] = [
+      {
+        id: "log_def1",
+        type: "تسجيل دخول للطلاب",
+        name: "أحمد بن علي",
+        info: "سجل حضور للمنصة التفاعلية",
+        score: "-",
+        timestamp: new Date(Date.now() - 3600000 * 5).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def2",
+        type: "اختبار رصد مهارة",
+        name: "أحمد بن علي",
+        info: "مراجعة الأعداد الكبيرة ضمن المليارات",
+        score: "١٠ من ١٠",
+        timestamp: new Date(Date.now() - 3600000 * 4.8).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def3",
+        type: "تسجيل دخول للطلاب",
+        name: "خالد اليماني",
+        info: "سجل حضور للمنصة التفاعلية",
+        score: "-",
+        timestamp: new Date(Date.now() - 3600000 * 3).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def4",
+        type: "تسجيل دخول للطلاب",
+        name: "محمد الهاشمي",
+        info: "سجل حضور للمنصة التفاعلية",
+        score: "-",
+        timestamp: new Date(Date.now() - 3600000 * 2.5).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def5",
+        type: "اختبار رصد مهارة",
+        name: "محمد الهاشمي",
+        info: "درس الأسس والجذور التربيعية والتكعيبية",
+        score: "٩ من ١٠",
+        timestamp: new Date(Date.now() - 3600000 * 2).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def6",
+        type: "تسجيل دخول للطلاب",
+        name: "علي الكبسي",
+        info: "سجل حضور للمنصة التفاعلية",
+        score: "-",
+        timestamp: new Date(Date.now() - 3600000 * 1.5).toLocaleString("ar-YE", { hour12: true })
+      },
+      {
+        id: "log_def7",
+        type: "تسجيل دخول للطلاب",
+        name: "سفيان العبسي",
+        info: "سجل حضور للمنصة التفاعلية",
+        score: "-",
+        timestamp: new Date(Date.now() - 3600000 * 1).toLocaleString("ar-YE", { hour12: true })
       }
-    } else {
-      const defaultComments: ForumComment[] = [
-        {
-          id: "fc1",
-          studentName: "أحمد بن علي",
-          text: "منصة رائعة جداً يا أستاذ وديع! درس مراجعة الأعداد الكبيرة ضمن المليارات سهل علي فهم ترتيب الخانات والقيمة المكانية.",
-          category: "شكر",
-          timestamp: new Date(Date.now() - 3600000 * 4).toLocaleString("ar-YE", { hour12: true }),
-          likes: 5
-        },
-        {
-          id: "fc2",
-          studentName: "خالد اليماني",
-          text: "شباب، عندي سؤال: في درس الأسس والجذور، الرقم ٥ أس ٣ كيف نحسبه؟ هل هو ٥ ضرب ٣ أم ٥ ثلاث مرات؟",
-          category: "استفسار",
-          timestamp: new Date(Date.now() - 3600000 * 2).toLocaleString("ar-YE", { hour12: true }),
-          likes: 3
-        },
-        {
-          id: "fc3",
-          studentName: "محمد الهاشمي",
-          text: "يا خالد، ٥ أس ٣ تعني ٥ ضرب ٥ ضرب ٥ وتساوي ١٢٥. لأن الأس هو تكرار الضرب للأساس بعدد مرات الأس.",
-          category: "مناقشة",
-          timestamp: new Date(Date.now() - 3600000).toLocaleString("ar-YE", { hour12: true }),
-          likes: 8
-        },
-        {
-          id: "fc4",
-          studentName: "علي الكبسي",
-          text: "فائدة يا زملائي: لحساب القيمة المكانية لعدد بسهولة، نضع أصفاراً مكان كل الخانات الواقعة على يمين الرقم المطلوب.",
-          category: "فائدة",
-          timestamp: new Date(Date.now() - 1800000).toLocaleString("ar-YE", { hour12: true }),
-          likes: 4
-        }
-      ];
-      setForumComments(defaultComments);
-      localStorage.setItem("wadeehForumComments", JSON.stringify(defaultComments));
-    }
+    ];
 
-    // Load Feedback Messages
-    const savedFeedback = localStorage.getItem("wadeehFeedbackMessages");
-    if (savedFeedback) {
-      try {
-        setFeedbackMessages(JSON.parse(savedFeedback));
-      } catch (e) {
-        setFeedbackMessages([]);
+    const defaultComments: ForumComment[] = [
+      {
+        id: "fc1",
+        studentName: "أحمد بن علي",
+        text: "منصة رائعة جداً يا أستاذ وديع! درس مراجعة الأعداد الكبيرة ضمن المليارات سهل علي فهم ترتيب الخانات والقيمة المكانية.",
+        category: "شكر",
+        timestamp: new Date(Date.now() - 3600000 * 4).toLocaleString("ar-YE", { hour12: true }),
+        likes: 5
+      },
+      {
+        id: "fc2",
+        studentName: "خالد اليماني",
+        text: "شباب، عندي سؤال: في درس الأسس والجذور، الرقم ٥ أس ٣ كيف نحسبه؟ هل هو ٥ ضرب ٣ أم ٥ ثلاث مرات؟",
+        category: "استفسار",
+        timestamp: new Date(Date.now() - 3600000 * 2).toLocaleString("ar-YE", { hour12: true }),
+        likes: 3
+      },
+      {
+        id: "fc3",
+        studentName: "محمد الهاشمي",
+        text: "يا خالد، ٥ أس ٣ تعني ٥ ضرب ٥ ضرب ٥ وتساوي ١٢٥. لأن الأس هو تكرار الضرب للأساس بعدد مرات الأس.",
+        category: "مناقشة",
+        timestamp: new Date(Date.now() - 3600000).toLocaleString("ar-YE", { hour12: true }),
+        likes: 8
+      },
+      {
+        id: "fc4",
+        studentName: "علي الكبسي",
+        text: "فائدة يا زملائي: لحساب القيمة المكانية لعدد بسهولة، نضع أصفاراً مكان كل الخانات الواقعة على يمين الرقم المطلوب.",
+        category: "فائدة",
+        timestamp: new Date(Date.now() - 1800000).toLocaleString("ar-YE", { hour12: true }),
+        likes: 4
       }
-    } else {
-      const defaultFeedback: FeedbackMessage[] = [
-        {
-          id: "fb1",
-          studentName: "سفيان العبسي",
-          category: "مسألة",
-          text: "أستاذ وديع، لم أفهم السؤال الخامس في درس ترتيب العمليات، لماذا الضرب يسبق الطرح بالرغم من أن الطرح في الأول؟",
-          timestamp: new Date(Date.now() - 3600000 * 12).toLocaleString("ar-YE", { hour12: true }),
-          reply: "أهلاً يا بني سفيان. لأن قوة العمليات في الرياضيات تعطي الأسبقية دائماً للضرب والقسمة على الجمع والطرح، حتى لو جاء الطرح في البداية."
+    ];
+
+    const defaultFeedback: FeedbackMessage[] = [
+      {
+        id: "fb1",
+        studentName: "سفيان العبسي",
+        category: "مسألة",
+        text: "أستاذ وديع، لم أفهم السؤال الخامس في درس ترتيب العمليات، لماذا الضرب يسبق الطرح بالرغم من أن الطرح في الأول؟",
+        timestamp: new Date(Date.now() - 3600000 * 12).toLocaleString("ar-YE", { hour12: true }),
+        reply: "أهلاً يا بني سفيان. لأن قوة العمليات في الرياضيات تعطي الأسبقية دائماً للضرب والقسمة على الجمع والطرح، حتى لو جاء الطرح في البداية."
+      }
+    ];
+
+    const seedAllIfRequired = async () => {
+      const alreadySeeded = localStorage.getItem("wadeeh_db_seeded_v1");
+      if (!alreadySeeded) {
+        try {
+          await seedDefaultLogs(defaultLogs);
+          await seedDefaultForumComments(defaultComments);
+          await seedDefaultFeedbackMessages(defaultFeedback);
+          
+          // Seed initial passwords too
+          let defaultPasswords: Record<string, string> = {};
+          for (let i = 1; i <= 16; i++) {
+            defaultPasswords["L" + i] = "١٢٣" + toArabicDigits(i);
+          }
+          await updatePasswords(defaultPasswords);
+
+          localStorage.setItem("wadeeh_db_seeded_v1", "true");
+        } catch (e) {
+          console.error("Seeding failed:", e);
         }
-      ];
-      setFeedbackMessages(defaultFeedback);
-      localStorage.setItem("wadeehFeedbackMessages", JSON.stringify(defaultFeedback));
-    }
+      }
+    };
+
+    seedAllIfRequired();
+
+    // Subscribe to Logs in real-time
+    const unsubLogs = subscribeLogs((loadedLogs) => {
+      setLogs(loadedLogs);
+    });
+
+    // Subscribe to Forum in real-time
+    const unsubForum = subscribeForum((loadedComments) => {
+      setForumComments(loadedComments);
+    });
+
+    // Subscribe to Feedback Messages in real-time
+    const unsubFeedback = subscribeFeedback((loadedFeedback) => {
+      setFeedbackMessages(loadedFeedback);
+    });
+
+    // Subscribe to Passwords in real-time
+    const unsubPasswords = subscribePasswords((loadedPasswords) => {
+      if (Object.keys(loadedPasswords).length === 0) {
+        let defaultPasswords: Record<string, string> = {};
+        for (let i = 1; i <= 16; i++) {
+          defaultPasswords["L" + i] = "١٢٣" + toArabicDigits(i);
+        }
+        setPasswords(defaultPasswords);
+      } else {
+        setPasswords(loadedPasswords);
+      }
+    });
+
+    return () => {
+      unsubLogs();
+      unsubForum();
+      unsubFeedback();
+      unsubPasswords();
+    };
   }, []);
 
   // Recalculate student statistics based on logs when name or logs change
@@ -259,7 +445,7 @@ export default function App() {
           if (prev <= 1) {
             setQuizActive(false);
             if (interval) clearInterval(interval);
-            alert("⏰ انتهى الوقت الكلي المحدد للدرس! سيتم رصد وحفظ نتيجتك الحالية تلقائياً.");
+            showAlert("انتهى الوقت الكلي المحدد للدرس! سيتم رصد وحفظ نتيجتك الحالية تلقائياً.", "⏱️ انتهى الوقت!");
             finishQuizAndSubmit();
             return 0;
           }
@@ -275,19 +461,24 @@ export default function App() {
   }, [quizActive]);
 
   // Save logs helper
-  const saveLog = (type: string, name: string, info: string, score: string) => {
-    const newEntry: LogEntry = {
-      id: "log_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+  const saveLog = async (type: string, name: string, info: string, score: string) => {
+    const entry = {
       type,
       name,
       info,
       score,
       timestamp: new Date().toLocaleString("ar-YE", { hour12: true })
     };
-
-    const updated = [...logs, newEntry];
-    setLogs(updated);
-    localStorage.setItem("wadeehAdminSystemLogs", JSON.stringify(updated));
+    try {
+      await addLog(entry);
+    } catch (e) {
+      console.error("Error saving log to Firebase:", e);
+      const newEntry: LogEntry = {
+        id: "log_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+        ...entry
+      };
+      setLogs((prev) => [newEntry, ...prev]);
+    }
   };
 
   // Student enters platform
@@ -295,7 +486,7 @@ export default function App() {
     e.preventDefault();
     const trimmed = studentName.trim();
     if (!trimmed) {
-      alert("الرجاء كتابة اسمك الثلاثي أولاً لكي نتمكن من رصد درجاتك.");
+      showAlert("الرجاء كتابة اسمك الثلاثي أولاً لكي نتمكن من رصد درجاتك.", "⚠️ تنبيه هام");
       return;
     }
     setStudentName(trimmed);
@@ -306,12 +497,12 @@ export default function App() {
 
   // Exit student session
   const handleExitPlatform = () => {
-    if (confirm("هل تود تسجيل الخروج الكامل من المنصة التفاعلية؟")) {
+    showConfirm("هل تود تسجيل الخروج الكامل من المنصة التفاعلية؟", () => {
       saveLog("تسجيل خروج", studentName, "خرج من نظام الفهرس", "-");
       setStudentName("");
       localStorage.removeItem("activeStudentName");
       setScreen("welcome");
-    }
+    }, "تسجيل خروج");
   };
 
   // Access administrative control
@@ -321,14 +512,14 @@ export default function App() {
       setScreen("admin");
       setAdminPasswordInput("");
     } else {
-      alert("❌ خطأ أمني في كلمة المرور! يرجى مراجعة الأستاذ وديع الحاج.");
+      showAlert("خطأ أمني في كلمة المرور! يرجى مراجعة الأستاذ وديع الحاج.", "❌ خطأ أمني");
     }
   };
 
   // Click on a lesson card
   const handleLessonClick = (lesson: Lesson) => {
     if (!studentName) {
-      alert("يرجى إدخال اسمك الثلاثي أولاً بوضوح للوصول إلى المواد الدراسية.");
+      showAlert("يرجى إدخال اسمك الثلاثي أولاً بوضوح للوصول إلى المواد الدراسية.", "⚠️ تنبيه");
       return;
     }
     setLessonToUnlock(lesson);
@@ -386,11 +577,15 @@ export default function App() {
 
   // Exit active quiz warning
   const handleExitQuizConfirm = () => {
-    if (confirm("هل تود العودة لقائمة الدروس؟ لن يتم حفظ أو رصد إجابات هذا الاختبار الحالي.")) {
-      setQuizActive(false);
-      setSelectedLesson(null);
-      setScreen("dashboard");
-    }
+    showConfirm(
+      "هل تود العودة لقائمة الدروس؟ لن يتم حفظ أو رصد إجابات هذا الاختبار الحالي.",
+      () => {
+        setQuizActive(false);
+        setSelectedLesson(null);
+        setScreen("dashboard");
+      },
+      "تنبيه مغادرة الاختبار"
+    );
   };
 
   // Calc score and save log
@@ -445,25 +640,35 @@ export default function App() {
   };
 
   // Admin section: Update passwords
-  const handleUpdatePassword = (lessonId: string, newPwd: string) => {
+  const handleUpdatePassword = async (lessonId: string, newPwd: string) => {
     const updated = { ...passwords, [lessonId]: newPwd };
-    setPasswords(updated);
-    localStorage.setItem("lessonPasswords", JSON.stringify(updated));
+    try {
+      await updatePasswords(updated);
+    } catch (e) {
+      console.error("Error updating passwords on Firebase:", e);
+    }
   };
 
   // Admin section: Wipe logs
   const handleWipeLogs = () => {
-    if (confirm("تحذير أمني هام: هل أنت متأكد من مسح جميع سجلات كشوفات حضور ودرجات الطلاب نهائياً؟ لا يمكن التراجع عن هذا الإجراء.")) {
-      setLogs([]);
-      localStorage.removeItem("wadeehAdminSystemLogs");
-      alert("تم مسح السجلات والكشوفات بنجاح.");
-    }
+    showConfirm(
+      "تحذير أمني هام: هل أنت متأكد من مسح جميع سجلات كشوفات حضور ودرجات الطلاب نهائياً؟ لا يمكن التراجع عن هذا الإجراء.",
+      async () => {
+        try {
+          await clearAllLogs();
+          showAlert("تم مسح السجلات والكشوفات بنجاح.", "✅ نجاح العملية");
+        } catch (e) {
+          console.error("Error clearing logs:", e);
+        }
+      },
+      "⚠️ تحذير مسح السجلات"
+    );
   };
 
   // Admin section: Export Excel (CSV)
   const handleDownloadCSV = () => {
     if (logs.length === 0) {
-      alert("لا توجد بيانات مسجلة للتصدير حالياً.");
+      showAlert("لا توجد بيانات مسجلة للتصدير حالياً.", "⚠️ لا توجد بيانات");
       return;
     }
     // UTF-8 BOM to display Arabic correctly in Excel
@@ -483,12 +688,11 @@ export default function App() {
   };
 
   // Submit Forum Comment
-  const handleAddForumComment = (e: React.FormEvent) => {
+  const handleAddForumComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCommentText.trim()) return;
 
-    const newComment: ForumComment = {
-      id: "comment_" + Date.now(),
+    const newComment = {
       studentName: studentName || "زائر مجهول",
       text: newCommentText.trim(),
       category: newCommentCategory,
@@ -496,82 +700,91 @@ export default function App() {
       likes: 0
     };
 
-    const updated = [newComment, ...forumComments];
-    setForumComments(updated);
-    localStorage.setItem("wadeehForumComments", JSON.stringify(updated));
-    setNewCommentText("");
-    saveLog("مشاركة في المنتدى", studentName || "زائر مجهول", `أضاف تعليقاً في ساحة النقاش (${newCommentCategory})`, "-");
+    try {
+      await addForumComment(newComment);
+      setNewCommentText("");
+      await saveLog("مشاركة في المنتدى", studentName || "زائر مجهول", `أضاف تعليقاً في ساحة النقاش (${newCommentCategory})`, "-");
+    } catch (e) {
+      console.error("Error adding forum comment:", e);
+    }
   };
 
   // Like comment
-  const handleLikeComment = (id: string) => {
-    const updated = forumComments.map((comment) => {
-      if (comment.id === id) {
-        return { ...comment, likes: comment.likes + 1 };
-      }
-      return comment;
-    });
-    setForumComments(updated);
-    localStorage.setItem("wadeehForumComments", JSON.stringify(updated));
+  const handleLikeComment = async (id: string) => {
+    try {
+      await likeForumComment(id);
+    } catch (e) {
+      console.error("Error liking comment:", e);
+    }
   };
 
   // Submit Feedback Message
-  const handleAddFeedbackMessage = (e: React.FormEvent) => {
+  const handleAddFeedbackMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newFeedbackText.trim()) return;
 
-    const newMsg: FeedbackMessage = {
-      id: "feedback_" + Date.now(),
+    const newMsg = {
       studentName: studentName || "زائر مجهول",
       category: newFeedbackCategory,
       text: newFeedbackText.trim(),
       timestamp: new Date().toLocaleString("ar-YE", { hour12: true })
     };
 
-    const updated = [newMsg, ...feedbackMessages];
-    setFeedbackMessages(updated);
-    localStorage.setItem("wadeehFeedbackMessages", JSON.stringify(updated));
-    setNewFeedbackText("");
-    saveLog("إرسال استفسار خاص", studentName || "زائر مجهول", `أرسل استفساراً خاصاً للمعلم حول: ${newFeedbackCategory}`, "-");
-    alert("✅ تم إرسال رسالتك وتساؤلك بنجاح إلى الأستاذ وديع الحاج. سيقوم الأستاذ بمراجعة السؤال والرد عليه، ويمكنك تصفح الردود هنا في أي وقت!");
+    try {
+      await addFeedbackMessage(newMsg);
+      setNewFeedbackText("");
+      await saveLog("إرسال استفسار خاص", studentName || "زائر مجهول", `أرسل استفساراً خاصاً للمعلم حول: ${newFeedbackCategory}`, "-");
+      showAlert("تم إرسال رسالتك وتساؤلك بنجاح إلى الأستاذ وديع الحاج. سيقوم الأستاذ بمراجعة السؤال والرد عليه، ويمكنك تصفح الردود هنا في أي وقت!", "✅ تم الإرسال بنجاح");
+    } catch (e) {
+      console.error("Error sending feedback message:", e);
+    }
   };
 
   // Admin replies to feedback messages
-  const handleAdminReplyFeedback = (id: string, replyText: string) => {
+  const handleAdminReplyFeedback = async (id: string, replyText: string) => {
     if (!replyText.trim()) return;
-    const updated = feedbackMessages.map((msg) => {
-      if (msg.id === id) {
-        return { ...msg, reply: replyText.trim() };
-      }
-      return msg;
-    });
-    setFeedbackMessages(updated);
-    localStorage.setItem("wadeehFeedbackMessages", JSON.stringify(updated));
+    try {
+      await replyFeedbackMessage(id, replyText.trim());
+    } catch (e) {
+      console.error("Error replying to feedback message:", e);
+    }
   };
 
   // Delete comment (admin tool)
   const handleDeleteForumComment = (id: string) => {
-    if (confirm("هل تريد بالتأكيد حذف هذا التعليق؟")) {
-      const updated = forumComments.filter((c) => c.id !== id);
-      setForumComments(updated);
-      localStorage.setItem("wadeehForumComments", JSON.stringify(updated));
-    }
+    showConfirm(
+      "هل تريد بالتأكيد حذف هذا التعليق؟",
+      async () => {
+        try {
+          await deleteForumComment(id);
+        } catch (e) {
+          console.error("Error deleting comment:", e);
+        }
+      },
+      "🗑️ حذف التعليق"
+    );
   };
 
   // Delete message (admin tool)
   const handleDeleteFeedbackMessage = (id: string) => {
-    if (confirm("هل تريد بالتأكيد حذف هذه الرسالة؟")) {
-      const updated = feedbackMessages.filter((m) => m.id !== id);
-      setFeedbackMessages(updated);
-      localStorage.setItem("wadeehFeedbackMessages", JSON.stringify(updated));
-    }
+    showConfirm(
+      "هل تريد بالتأكيد حذف هذه الرسالة؟",
+      async () => {
+        try {
+          await deleteFeedbackMessage(id);
+        } catch (e) {
+          console.error("Error deleting feedback message:", e);
+        }
+      },
+      "🗑️ حذف الرسالة"
+    );
   };
 
   // Launch custom quiz generator
   const handleLaunchCustomQuiz = (e: React.FormEvent) => {
     e.preventDefault();
     if (customSelectedLessons.length === 0) {
-      alert("⚠️ الرجاء اختيار درس واحد على الأقل لتوليد الاختبار المخصص!");
+      showAlert("الرجاء اختيار درس واحد على الأقل لتوليد الاختبار المخصص!", "⚠️ اختيار ناقص");
       return;
     }
 
@@ -585,7 +798,7 @@ export default function App() {
     });
 
     if (pooledQuestions.length === 0) {
-      alert("⚠️ لا توجد أسئلة متوفرة في الدروس المحددة!");
+      showAlert("لا توجد أسئلة متوفرة في الدروس المحددة!", "⚠️ خطأ في الأسئلة");
       return;
     }
 
@@ -777,13 +990,214 @@ export default function App() {
                   </div>
                 </div>
 
-                <button
-                  onClick={handleExitPlatform}
-                  className="bg-slate-950/60 hover:bg-rose-950/20 hover:text-rose-400 border border-slate-800 text-slate-400 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span>خروج</span>
-                </button>
+                <div className="flex flex-wrap gap-2 justify-center">
+                  <button
+                    onClick={() => {
+                      setAdminDashboardPassword("");
+                      setAdminDashboardError("");
+                      setShowAdminLoginModal(true);
+                    }}
+                    className="bg-slate-950/60 hover:bg-amber-950/20 hover:text-amber-400 border border-slate-800 text-slate-400 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-amber-500" />
+                    <span>لوحة التحكم (المعلم)</span>
+                  </button>
+
+                  <button
+                    onClick={handleExitPlatform}
+                    className="bg-slate-950/60 hover:bg-rose-950/20 hover:text-rose-400 border border-slate-800 text-slate-400 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>خروج</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* 🏆 GAMIFIED BADGES & COMPETITIVE REWARDS SECTION */}
+              <div className="bg-slate-900/40 border border-white/5 rounded-2xl p-5 space-y-4 text-right">
+                <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
+                  <div>
+                    <h3 className="text-xs md:text-sm font-extrabold text-amber-400 flex items-center gap-1.5">
+                      <Trophy className="w-4.5 h-4.5 text-amber-500 animate-bounce" />
+                      <span>🏆 لوحة الأوسمة والإنجازات للعباقرة:</span>
+                    </h3>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      تميز واجتهد في حل الاختبارات للحصول على الأوسمة والميداليات الرقمية!
+                    </p>
+                  </div>
+                  {maxConsecutivePerfect > 0 && (
+                    <span className="bg-indigo-500/10 text-indigo-400 text-[10px] font-black px-2.5 py-1 rounded-lg border border-indigo-500/20">
+                      🔥 المتتالية الحالية: {toArabicDigits(maxConsecutivePerfect)} دروس
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* BADGE 1: Triple Consecutive Perfect Score (The core requirement) */}
+                  <div
+                    className={`relative rounded-xl p-4 border transition-all text-center flex flex-col items-center justify-between gap-3 ${
+                      hasTripleConsecutiveBadge
+                        ? "bg-amber-500/10 border-amber-500/30 shadow-lg shadow-amber-500/5"
+                        : "bg-slate-950/20 border-slate-800/80 opacity-60"
+                    }`}
+                  >
+                    {hasTripleConsecutiveBadge && (
+                      <span className="absolute top-2 right-2 bg-amber-500 text-slate-950 font-black text-[8px] px-1.5 py-0.5 rounded-full uppercase tracking-wider animate-pulse">
+                        بطل متألق
+                      </span>
+                    )}
+                    <div
+                      className={`p-3 rounded-full flex items-center justify-center ${
+                        hasTripleConsecutiveBadge
+                          ? "bg-amber-500/20 text-amber-400 ring-2 ring-amber-500/40 animate-pulse"
+                          : "bg-slate-900 text-slate-600"
+                      }`}
+                    >
+                      <Award className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4
+                        className={`text-xs font-extrabold ${
+                          hasTripleConsecutiveBadge ? "text-amber-300" : "text-slate-400"
+                        }`}
+                      >
+                        وسام العبقري الثلاثي
+                      </h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed min-h-[32px] flex items-center justify-center">
+                        إنجاز ٣ دروس متتالية بالدرجة الكاملة (١٠٠٪) دون خطأ!
+                      </p>
+                    </div>
+                    <div className="w-full pt-2 border-t border-slate-850">
+                      <span
+                        className={`text-[10px] font-bold ${
+                          hasTripleConsecutiveBadge ? "text-amber-400" : "text-slate-500"
+                        }`}
+                      >
+                        {hasTripleConsecutiveBadge ? "🏆 تم الإنجاز والتفعيل!" : `⏳ المتتالية الحالية: ${toArabicDigits(maxConsecutivePerfect)} / ${toArabicDigits(3)}`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* BADGE 2: First Perfect Score (Trophy) */}
+                  <div
+                    className={`relative rounded-xl p-4 border transition-all text-center flex flex-col items-center justify-between gap-3 ${
+                      hasFirstPerfectBadge
+                        ? "bg-emerald-500/10 border-emerald-500/30 shadow-lg shadow-emerald-500/5"
+                        : "bg-slate-950/20 border-slate-800/80 opacity-60"
+                    }`}
+                  >
+                    <div
+                      className={`p-3 rounded-full flex items-center justify-center ${
+                        hasFirstPerfectBadge
+                          ? "bg-emerald-500/20 text-emerald-400 ring-2 ring-emerald-500/40"
+                          : "bg-slate-900 text-slate-600"
+                      }`}
+                    >
+                      <Trophy className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4
+                        className={`text-xs font-extrabold ${
+                          hasFirstPerfectBadge ? "text-emerald-300" : "text-slate-400"
+                        }`}
+                      >
+                        وسام بطل البداية
+                      </h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed min-h-[32px] flex items-center justify-center">
+                        تحقيق الدرجة الكاملة ١٠/١٠ لأول مرة في أي درس.
+                      </p>
+                    </div>
+                    <div className="w-full pt-2 border-t border-slate-850">
+                      <span
+                        className={`text-[10px] font-bold ${
+                          hasFirstPerfectBadge ? "text-emerald-400" : "text-slate-500"
+                        }`}
+                      >
+                        {hasFirstPerfectBadge ? "🏆 تم الإنجاز بنجاح!" : "⏳ لم ينجز بعد"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* BADGE 3: Persistent Explorer (Flame icon) */}
+                  <div
+                    className={`relative rounded-xl p-4 border transition-all text-center flex flex-col items-center justify-between gap-3 ${
+                      uniqueCompletedLessonsCount >= 5
+                        ? "bg-orange-500/10 border-orange-500/30 shadow-lg shadow-orange-500/5"
+                        : "bg-slate-950/20 border-slate-800/80 opacity-60"
+                    }`}
+                  >
+                    <div
+                      className={`p-3 rounded-full flex items-center justify-center ${
+                        uniqueCompletedLessonsCount >= 5
+                          ? "bg-orange-500/20 text-orange-400 ring-2 ring-orange-500/40"
+                          : "bg-slate-900 text-slate-600"
+                      }`}
+                    >
+                      <Flame className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4
+                        className={`text-xs font-extrabold ${
+                          uniqueCompletedLessonsCount >= 5 ? "text-orange-300" : "text-slate-400"
+                        }`}
+                      >
+                        وسام المغامر الحسابي
+                      </h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed min-h-[32px] flex items-center justify-center">
+                        حل واجتياز ٥ دروس رياضيات مختلفة بنجاح.
+                      </p>
+                    </div>
+                    <div className="w-full pt-2 border-t border-slate-850">
+                      <span
+                        className={`text-[10px] font-bold ${
+                          uniqueCompletedLessonsCount >= 5 ? "text-orange-400" : "text-slate-500"
+                        }`}
+                      >
+                        {uniqueCompletedLessonsCount >= 5 ? "🏆 تم إنجاز التحدي!" : `⏳ تقدمك: ${toArabicDigits(uniqueCompletedLessonsCount)} / ${toArabicDigits(5)}`}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* BADGE 4: Crown of Excellence (Crown icon) */}
+                  <div
+                    className={`relative rounded-xl p-4 border transition-all text-center flex flex-col items-center justify-between gap-3 ${
+                      totalPerfectScoresCount >= 8
+                        ? "bg-indigo-500/10 border-indigo-500/30 shadow-lg shadow-indigo-500/5"
+                        : "bg-slate-950/20 border-slate-800/80 opacity-60"
+                    }`}
+                  >
+                    <div
+                      className={`p-3 rounded-full flex items-center justify-center ${
+                        totalPerfectScoresCount >= 8
+                          ? "bg-indigo-500/20 text-indigo-400 ring-2 ring-indigo-500/40"
+                          : "bg-slate-900 text-slate-600"
+                      }`}
+                    >
+                      <Crown className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h4
+                        className={`text-xs font-extrabold ${
+                          totalPerfectScoresCount >= 8 ? "text-indigo-300" : "text-slate-400"
+                        }`}
+                      >
+                        تاج التميز الملكي
+                      </h4>
+                      <p className="text-[10px] text-slate-500 leading-relaxed min-h-[32px] flex items-center justify-center">
+                        الحصول على العلامة الكاملة ١٠/١٠ في ٨ اختبارات أو أكثر.
+                      </p>
+                    </div>
+                    <div className="w-full pt-2 border-t border-slate-850">
+                      <span
+                        className={`text-[10px] font-bold ${
+                          totalPerfectScoresCount >= 8 ? "text-indigo-400" : "text-slate-500"
+                        }`}
+                      >
+                        {totalPerfectScoresCount >= 8 ? "🏆 ملك الرياضيات المعتمد!" : `⏳ تقدمك: ${toArabicDigits(totalPerfectScoresCount)} / ${toArabicDigits(8)}`}
+                      </span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* TAB BAR FOR DASHBOARD SCREENS */}
@@ -1654,11 +2068,11 @@ export default function App() {
                 </div>
 
                 <button
-                  onClick={() => setScreen("welcome")}
+                  onClick={() => setScreen(studentName ? "dashboard" : "welcome")}
                   className="bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-400 px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1 cursor-pointer"
                 >
                   <ArrowRight className="w-4 h-4" />
-                  <span>رجوع للرئيسية</span>
+                  <span>{studentName ? "العودة للوحة الطلاب" : "رجوع للرئيسية"}</span>
                 </button>
               </div>
 
@@ -1755,7 +2169,7 @@ export default function App() {
                                 className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-center font-bold text-amber-400 focus:outline-none focus:border-indigo-500 flex-grow"
                               />
                               <button
-                                onClick={() => alert(`✅ تم تحديث كلمة مرور الدرس [${lesson.title}] بنجاح في قاعدة البيانات المحلية!`)}
+                                onClick={() => showAlert(`تم تحديث كلمة مرور الدرس [${lesson.title}] بنجاح في قاعدة البيانات المحلية!`, "✅ تم التحديث")}
                                 className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer shrink-0"
                               >
                                 تحديث
@@ -1769,97 +2183,268 @@ export default function App() {
                 )}
 
                 {/* ADMIN TAB 2: LIVE LOGS VIEW */}
-                {adminTab === "logs" && (
-                  <motion.div
-                    key="admin_logs"
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                    transition={{ duration: 0.15 }}
-                    className="space-y-4"
-                  >
-                    <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-                      <h3 className="text-sm md:text-base font-extrabold text-indigo-300 flex items-center gap-2">
-                        <FileSpreadsheet className="w-4.5 h-4.5 text-amber-400" />
-                        <span>📊 كشف حركة حضور واختبارات الطلاب المترددين على المنصة:</span>
-                      </h3>
-                      
-                      {/* Action buttons inside tab */}
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={handleDownloadCSV}
-                          className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold px-3.5 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer transition-all"
-                        >
-                          <FileSpreadsheet className="w-3.5 h-3.5" />
-                          <span>تحميل Excel (CSV)</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={handleWipeLogs}
-                          className="bg-rose-950/60 hover:bg-rose-900/40 border border-rose-900/50 text-rose-300 font-bold px-3.5 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer transition-all"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>مسح السجلات</span>
-                        </button>
-                      </div>
-                    </div>
+                {adminTab === "logs" && (() => {
+                  const testLogEntries = logs.filter((l) => l.type === "اختبار رصد مهارة");
+                  const studentsWithTests = Array.from(new Set(testLogEntries.map((l) => l.name)));
+                  const activeChartStudent = selectedChartStudent || studentsWithTests[0] || "";
+                  
+                  const studentTests = testLogEntries
+                    .filter((l) => l.name === activeChartStudent)
+                    .map((l, index) => {
+                      const scorePct = getScorePercentage(l.score);
+                      return {
+                        name: `اختبار ${index + 1}`,
+                        lesson: l.info,
+                        score: scorePct,
+                        scoreRaw: l.score,
+                        timestamp: l.timestamp
+                      };
+                    });
 
-                    <div className="bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden shadow-inner">
-                      <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
-                        <table className="w-full text-xs md:text-sm text-right border-collapse">
-                          <thead className="sticky top-0 bg-slate-950 z-20">
-                            <tr className="bg-slate-900 border-b border-slate-800">
-                              <th className="p-3 font-bold text-indigo-400 text-center">نوع الحركة</th>
-                              <th className="p-3 font-bold text-indigo-400">اسم الطالب المتردد</th>
-                              <th className="p-3 font-bold text-indigo-400">البيان والدرس الحسابي</th>
-                              <th className="p-3 font-bold text-indigo-400 text-center">النتيجة المرصودة</th>
-                              <th className="p-3 font-bold text-indigo-400 text-center">التاريخ والوقت</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {logs.length === 0 ? (
-                              <tr>
-                                <td colSpan={5} className="p-8 text-center text-slate-500 font-bold">
-                                  لا توجد سجلات حضور أو درجات للطلاب مسجلة حالياً في النظام المحلي.
-                                </td>
-                              </tr>
+                  return (
+                    <motion.div
+                      key="admin_logs"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.15 }}
+                      className="space-y-6"
+                    >
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                        <h3 className="text-sm md:text-base font-extrabold text-indigo-300 flex items-center gap-2">
+                          <FileSpreadsheet className="w-4.5 h-4.5 text-amber-400" />
+                          <span>📊 كشف حركة حضور واختبارات الطلاب المترددين على المنصة:</span>
+                        </h3>
+                        
+                        {/* Action buttons inside tab */}
+                        <div className="flex gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={handleDownloadCSV}
+                            className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold px-3.5 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer transition-all"
+                          >
+                            <FileSpreadsheet className="w-3.5 h-3.5" />
+                            <span>تحميل Excel (CSV)</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleWipeLogs}
+                            className="bg-rose-950/60 hover:bg-rose-900/40 border border-rose-900/50 text-rose-300 font-bold px-3.5 py-1.5 rounded-lg text-xs flex items-center gap-1 cursor-pointer transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>مسح السجلات</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* STUDENT PERFORMANCE CHART SECTION */}
+                      <div className="bg-slate-900/80 border border-white/5 rounded-2xl p-5 space-y-4 shadow-xl">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-850 pb-4">
+                          <div>
+                            <h4 className="font-extrabold text-xs md:text-sm text-amber-400 flex items-center gap-2">
+                              <Activity className="w-5 h-5 text-indigo-400" />
+                              <span>📈 مخطط نمو وتحليل تطور مستويات العباقرة:</span>
+                            </h4>
+                            <p className="text-[10px] md:text-xs text-slate-400 mt-1">
+                              تتبع الأداء والتحسن المستمر في اختبارات رصد مهارات الرياضيات
+                            </p>
+                          </div>
+
+                          {/* Student Dropdown / Selector */}
+                          {studentsWithTests.length > 0 ? (
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-slate-400">اختر الطالب:</span>
+                              <select
+                                value={activeChartStudent}
+                                onChange={(e) => setSelectedChartStudent(e.target.value)}
+                                className="bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-200 focus:outline-none cursor-pointer"
+                              >
+                                {studentsWithTests.map((name) => (
+                                  <option key={name} value={name}>
+                                    {name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <span className="text-xs font-bold text-rose-400 bg-rose-500/10 px-2.5 py-1 rounded-lg border border-rose-500/20">
+                              ⚠️ لا توجد اختبارات مسجلة بعد
+                            </span>
+                          )}
+                        </div>
+
+                        {activeChartStudent ? (
+                          <div className="space-y-4">
+                            {/* Student Mini Stats Cards */}
+                            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                              <div className="bg-slate-950/60 border border-slate-800/60 p-3.5 rounded-xl text-center space-y-1">
+                                <span className="text-[10px] font-bold text-slate-400 block">إجمالي الاختبارات</span>
+                                <span className="text-xs font-extrabold text-indigo-400 block">
+                                  {toArabicDigits(studentTests.length)} اختبارات
+                                </span>
+                              </div>
+                              <div className="bg-slate-950/60 border border-slate-800/60 p-3.5 rounded-xl text-center space-y-1">
+                                <span className="text-[10px] font-bold text-slate-400 block">أعلى درجة</span>
+                                <span className="text-xs font-extrabold text-emerald-400 block">
+                                  {toArabicDigits(studentTests.length > 0 ? Math.max(...studentTests.map(t => t.score)) : 0)}٪
+                                </span>
+                              </div>
+                              <div className="bg-slate-950/60 border border-slate-800/60 p-3.5 rounded-xl text-center space-y-1">
+                                <span className="text-[10px] font-bold text-slate-400 block">متوسط الفهم</span>
+                                <span className="text-xs font-extrabold text-amber-400 block">
+                                  {toArabicDigits(
+                                    studentTests.length > 0
+                                      ? Math.round(studentTests.reduce((sum, t) => sum + t.score, 0) / studentTests.length)
+                                      : 0
+                                  )}٪
+                                </span>
+                              </div>
+                              <div className="bg-slate-950/60 border border-slate-800/60 p-3.5 rounded-xl text-center space-y-1">
+                                <span className="text-[10px] font-bold text-slate-400 block">تقييم التحسن</span>
+                                <span className="text-xs font-extrabold text-purple-400 block">
+                                  {studentTests.length > 0
+                                    ? (studentTests[studentTests.length - 1].score >= 90 ? "ممتاز 🌟" : studentTests[studentTests.length - 1].score >= 70 ? "جيد جداً 👍" : "يحتاج مراجعة 📚")
+                                    : "لا يوجد"}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Recharts Area Chart Component */}
+                            {studentTests.length > 0 ? (
+                              <div className="bg-slate-950/40 border border-slate-800 p-4 rounded-xl">
+                                <div className="w-full h-48 md:h-64">
+                                  <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart
+                                      data={studentTests}
+                                      margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                                    >
+                                      <defs>
+                                        <linearGradient id="scoreColor" x1="0" y1="0" x2="0" y2="1">
+                                          <stop offset="5%" stopColor="#818cf8" stopOpacity={0.4}/>
+                                          <stop offset="95%" stopColor="#818cf8" stopOpacity={0.0}/>
+                                        </linearGradient>
+                                      </defs>
+                                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                                      <XAxis
+                                        dataKey="name"
+                                        stroke="#64748b"
+                                        fontSize={10}
+                                        tickLine={false}
+                                        tickFormatter={(val) => toArabicDigits(val.replace("اختبار ", ""))}
+                                      />
+                                      <YAxis
+                                        stroke="#64748b"
+                                        fontSize={10}
+                                        tickLine={false}
+                                        domain={[0, 100]}
+                                        tickFormatter={(val) => `${toArabicDigits(val)}٪`}
+                                      />
+                                      <Tooltip
+                                        content={({ active, payload }) => {
+                                          if (active && payload && payload.length) {
+                                            const data = payload[0].payload;
+                                            return (
+                                              <div className="bg-slate-950 border border-white/10 p-3 rounded-xl shadow-2xl text-right text-xs space-y-1.5 text-slate-200">
+                                                <p className="font-extrabold text-indigo-400">{data.lesson}</p>
+                                                <p className="font-bold">
+                                                  <span>النتيجة المرصودة: </span>
+                                                  <span className="text-amber-400 font-black">{data.scoreRaw}</span>
+                                                </p>
+                                                <p className="text-[10px] text-slate-500 font-medium">{data.timestamp}</p>
+                                              </div>
+                                            );
+                                          }
+                                          return null;
+                                        }}
+                                      />
+                                      <Area
+                                        type="monotone"
+                                        dataKey="score"
+                                        stroke="#818cf8"
+                                        strokeWidth={2.5}
+                                        fillOpacity={1}
+                                        fill="url(#scoreColor)"
+                                      />
+                                    </AreaChart>
+                                  </ResponsiveContainer>
+                                </div>
+                                <p className="text-[9px] text-slate-500 text-center mt-2">
+                                  * المحور الأفقي يوضح رقم المحاولة، والمحور الرأسي يوضح النسبة المئوية المنجزة (من ٠٪ إلى ١٠٠٪). مرر الماوس أو المس لرؤية التفاصيل.
+                                </p>
+                              </div>
                             ) : (
-                              [...logs].reverse().map((log) => (
-                                <tr
-                                  key={log.id}
-                                  className="border-b border-slate-900/60 hover:bg-slate-900/30 transition-all font-semibold text-xs"
-                                >
-                                  <td className="p-3 text-center">
-                                    <span className={`inline-block px-2.5 py-1 rounded-full text-[10px] font-black ${
-                                      log.type === "اختبار رصد مهارة"
-                                        ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
-                                        : log.type === "توليد اختبار مخصص"
-                                        ? "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20"
-                                        : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
-                                    }`}>
-                                      {log.type}
-                                    </span>
-                                  </td>
-                                  <td className="p-3 font-bold text-slate-200">{log.name}</td>
-                                  <td className="p-3 text-slate-300">{log.info}</td>
-                                  <td className="p-3 text-center">
-                                    <span className={log.score !== "-" ? "text-amber-400 font-black" : "text-slate-500"}>
-                                      {log.score}
-                                    </span>
-                                  </td>
-                                  <td className="p-3 text-center text-[10px] text-slate-500 font-mono whitespace-nowrap">
-                                    {log.timestamp}
+                              <div className="text-center py-8 text-slate-500 font-bold text-xs">
+                                لا توجد بيانات درجات كافية لرسم المخطط البياني لهذا الطالب المختار.
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-center py-8 text-slate-500 font-bold text-xs">
+                            لا يوجد أي طلاب قاموا بإجراء اختبارات حتى الآن لعرض مخطط أدائهم المترتب.
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="bg-slate-950/40 border border-slate-800 rounded-2xl overflow-hidden shadow-inner">
+                        <div className="overflow-x-auto max-h-[300px] overflow-y-auto">
+                          <table className="w-full text-xs md:text-sm text-right border-collapse">
+                            <thead className="sticky top-0 bg-slate-950 z-20">
+                              <tr className="bg-slate-900 border-b border-slate-800">
+                                <th className="p-3 font-bold text-indigo-400 text-center">نوع الحركة</th>
+                                <th className="p-3 font-bold text-indigo-400">اسم الطالب المتردد</th>
+                                <th className="p-3 font-bold text-indigo-400">البيان والدرس الحسابي</th>
+                                <th className="p-3 font-bold text-indigo-400 text-center">النتيجة المرصودة</th>
+                                <th className="p-3 font-bold text-indigo-400 text-center">التاريخ والوقت</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {logs.length === 0 ? (
+                                <tr>
+                                  <td colSpan={5} className="p-8 text-center text-slate-500 font-bold">
+                                    لا توجد سجلات حضور أو درجات للطلاب مسجلة حالياً في النظام المحلي.
                                   </td>
                                 </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
+                              ) : (
+                                [...logs].reverse().map((log) => (
+                                  <tr
+                                    key={log.id}
+                                    className="border-b border-slate-900/60 hover:bg-slate-900/30 transition-all font-semibold text-xs"
+                                  >
+                                    <td className="p-3 text-center">
+                                      <span className={`inline-block px-2.5 py-1 rounded-full text-[10px] font-black ${
+                                        log.type === "تسجيل دخول للطلاب"
+                                          ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 animate-pulse"
+                                          : log.type === "تسجيل خروج"
+                                          ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
+                                          : log.type === "اختبار رصد مهارة"
+                                          ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
+                                          : log.type === "توليد اختبار مخصص"
+                                          ? "bg-indigo-500/10 text-indigo-300 border border-indigo-500/20"
+                                          : "bg-blue-500/10 text-blue-400 border border-blue-500/20"
+                                      }`}>
+                                        {log.type}
+                                      </span>
+                                    </td>
+                                    <td className="p-3 font-bold text-slate-200">{log.name}</td>
+                                    <td className="p-3 text-slate-300">{log.info}</td>
+                                    <td className="p-3 text-center">
+                                      <span className={log.score !== "-" ? "text-amber-400 font-black" : "text-slate-500"}>
+                                        {log.score}
+                                      </span>
+                                    </td>
+                                    <td className="p-3 text-center text-[10px] text-slate-500 font-mono whitespace-nowrap">
+                                      {log.timestamp}
+                                    </td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
-                    </div>
-                  </motion.div>
-                )}
+                    </motion.div>
+                  );
+                })()}
 
                 {/* ADMIN TAB 3: FORUM COMMENTS MODERATION (رقابة المنتدى وحذف المشاركات) */}
                 {adminTab === "forum" && (
@@ -1981,7 +2566,7 @@ export default function App() {
                                           if (!replyDraftText.trim()) return;
                                           handleAdminReplyFeedback(msg.id, replyDraftText);
                                           setAdminRepliesState({ ...adminRepliesState, [msg.id]: "" });
-                                          alert("✅ تم تحديث الرد التربوي المكتوب للطالب بنجاح!");
+                                          showAlert("تم تحديث الرد التربوي المكتوب للطالب بنجاح!", "✅ تم التحديث");
                                         }}
                                         className="bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1 rounded-lg text-[10px] font-bold"
                                       >
@@ -2006,12 +2591,12 @@ export default function App() {
                                         type="button"
                                         onClick={() => {
                                           if (!replyDraftText.trim()) {
-                                            alert("يرجى كتابة نص الرد أولاً!");
+                                            showAlert("يرجى كتابة نص الرد أولاً!", "⚠️ حقل فارغ");
                                             return;
                                           }
                                           handleAdminReplyFeedback(msg.id, replyDraftText);
                                           setAdminRepliesState({ ...adminRepliesState, [msg.id]: "" });
-                                          alert("✅ تم إرسال وحفظ الرد التربوي بنجاح! سيتمكن الطالب من قراءته فوراً.");
+                                          showAlert("تم إرسال وحفظ الرد التربوي بنجاح! سيتمكن الطالب من قراءته فوراً.", "✅ تم إرسال الرد");
                                         }}
                                         className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer self-end h-[42px]"
                                       >
@@ -2035,10 +2620,10 @@ export default function App() {
               <div className="flex justify-end pt-4 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setScreen("welcome")}
-                  className="bg-slate-950 hover:bg-slate-900 border border-slate-800 text-slate-300 font-bold py-3 px-6 rounded-xl text-xs md:text-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  onClick={() => setScreen(studentName ? "dashboard" : "welcome")}
+                  className="bg-slate-950 hover:bg-slate-900 border border-slate-300/10 text-slate-300 font-bold py-3 px-6 rounded-xl text-xs md:text-sm transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  <span>العودة للشاشة الرئيسية</span>
+                  <span>{studentName ? "العودة للوحة الطلاب" : "العودة للشاشة الرئيسية"}</span>
                 </button>
               </div>
             </motion.div>
@@ -2134,6 +2719,201 @@ export default function App() {
                 <br />
                 أو تواصل مع الأستاذ وديع الحاج 776063283 للحصول عليه.
               </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* RENDER MODAL FOR DIRECT ADMIN LOGIN FROM WITHIN THE PLATFORM */}
+      <AnimatePresence>
+        {showAdminLoginModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              className="bg-slate-900 border border-white/10 p-6 rounded-2xl w-full max-w-sm text-right space-y-4 shadow-2xl relative"
+            >
+              <button
+                type="button"
+                onClick={() => setShowAdminLoginModal(false)}
+                className="absolute left-4 top-4 text-slate-400 hover:text-slate-100 p-1 rounded-lg hover:bg-slate-800 transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="text-center pb-2 border-b border-slate-800">
+                <div className="p-3 bg-amber-500/10 rounded-2xl text-amber-500 inline-block mb-2 border border-amber-500/20">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <h4 className="font-extrabold text-sm md:text-base text-slate-200">
+                  تسجيل دخول الإدارة (المعلم)
+                </h4>
+                <p className="text-[10px] text-slate-400 mt-1">
+                  خاص بالأستاذ وديع الحاج للتحكم الكامل بالمنصة
+                </p>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (adminDashboardPassword === "7730") {
+                    setScreen("admin");
+                    setShowAdminLoginModal(false);
+                    setAdminDashboardPassword("");
+                    setAdminDashboardError("");
+                  } else {
+                    setAdminDashboardError("❌ الرمز السري للدخول غير صحيح!");
+                  }
+                }}
+                className="space-y-4"
+              >
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold text-slate-300">
+                    أدخل الرمز السري المخصص للإدارة:
+                  </label>
+                  <input
+                    type="password"
+                    placeholder="رمز الدخول السري..."
+                    value={adminDashboardPassword}
+                    onChange={(e) => setAdminDashboardPassword(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-3 text-center font-extrabold text-amber-400 focus:outline-none focus:ring-1 focus:ring-indigo-500/50"
+                    autoFocus
+                    required
+                  />
+                </div>
+
+                {adminDashboardError && (
+                  <div className="bg-rose-500/10 border border-rose-500/20 p-2.5 rounded-lg text-rose-400 text-[10px] font-bold flex items-center gap-1.5 leading-relaxed">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                    <span>{adminDashboardError}</span>
+                  </div>
+                )}
+
+                <div className="pt-2 flex gap-2">
+                  <button
+                    type="submit"
+                    className="flex-grow bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs shadow-md transition-all cursor-pointer"
+                  >
+                    دخول لوحة التحكم
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminLoginModal(false)}
+                    className="bg-slate-800 hover:bg-slate-700 text-slate-400 px-4 py-2.5 rounded-xl text-xs transition-all cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* CUSTOM ALERT DIALOG MODAL */}
+      <AnimatePresence>
+        {customAlert && customAlert.show && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-[100] p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              className="bg-slate-900 border border-indigo-500/30 p-6 rounded-2xl w-full max-w-sm text-right space-y-4 shadow-2xl relative"
+            >
+              <div className="text-center pb-2 border-b border-slate-800">
+                <div className="p-3 bg-indigo-500/10 rounded-2xl text-indigo-400 inline-block mb-2 border border-indigo-500/20">
+                  <AlertCircle className="w-6 h-6 animate-pulse" />
+                </div>
+                <h4 className="font-extrabold text-sm md:text-base text-slate-200">
+                  {customAlert.title}
+                </h4>
+              </div>
+
+              <p className="text-xs md:text-sm text-slate-300 leading-relaxed font-semibold text-center py-2">
+                {customAlert.message}
+              </p>
+
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const onClose = customAlert.onClose;
+                    setCustomAlert(null);
+                    if (onClose) onClose();
+                  }}
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold py-3 rounded-xl text-xs md:text-sm shadow-md transition-all cursor-pointer"
+                >
+                  حسناً، فهمت
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* CUSTOM CONFIRM DIALOG MODAL */}
+      <AnimatePresence>
+        {customConfirm && customConfirm.show && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center z-[100] p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              className="bg-slate-900 border border-purple-500/30 p-6 rounded-2xl w-full max-w-sm text-right space-y-4 shadow-2xl relative"
+            >
+              <div className="text-center pb-2 border-b border-slate-800">
+                <div className="p-3 bg-purple-500/10 rounded-2xl text-purple-400 inline-block mb-2 border border-purple-500/20">
+                  <HelpCircle className="w-6 h-6 animate-bounce" />
+                </div>
+                <h4 className="font-extrabold text-sm md:text-base text-slate-200">
+                  {customConfirm.title}
+                </h4>
+              </div>
+
+              <p className="text-xs md:text-sm text-slate-300 leading-relaxed font-semibold text-center py-2">
+                {customConfirm.message}
+              </p>
+
+              <div className="pt-2 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const onConfirm = customConfirm.onConfirm;
+                    setCustomConfirm(null);
+                    onConfirm();
+                  }}
+                  className="flex-grow bg-purple-600 hover:bg-purple-500 text-white font-extrabold py-3 rounded-xl text-xs md:text-sm shadow-md transition-all cursor-pointer"
+                >
+                  تأكيد ومتابعة
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const onCancel = customConfirm.onCancel;
+                    setCustomConfirm(null);
+                    if (onCancel) onCancel();
+                  }}
+                  className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-5 py-3 rounded-xl text-xs md:text-sm font-bold transition-all cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}
